@@ -1,0 +1,1 @@
+"""Private receipt delivery example."""
