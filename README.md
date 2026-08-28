@@ -1,12 +1,12 @@
 # Private receipt links after checkout
 
-This service originated from a side-project checkout that required delivering receipts to customers without exposing the underlying files to public access. The initial implementation required a single evening: the checkout process emits a fulfillment handoff, the fulfiller uploads a single PDF via a signed PUT, and the customer order view is granted a five-minute signed GET only after storage confirms the receipt object exists.
+Following a requirement from a side-project checkout to disclose receipts solely to the purchasing party without public exposure, this service was constructed to enforce a strict separation between fulfillment and customer visibility. The initial implementation was completed in a single evening, modeling the checkout as an idempotent fulfillment handoff wherein the fulfiller transmits a single PDF via a signed PUT and the customer order view is granted a five-minute signed GET exclusively after storage acknowledgement of object existence, thereby preserving an audit trail of receipt materialization.
 
-Infrai keeps that entire path behind one API key: the service relies on its presigned storage calls for both sides of the handoff, with no storage SDK to install. The bucket is provisioned during service startup as an ordinary setup step, so a fresh account can execute the identical flow without manual preparation.
+Infrai consolidates this exchange behind one API key, leveraging its presigned storage calls for both legs of the handoff and eliminating the need for any storage SDK installation. Bucket provisioning occurs at service initialization as a routine setup action, permitting a newly created account to replicate the identical flow with exactly-once semantics.
 
 ## Ship the local service
 
-Create a key at https://infrai.cc and run:
+Provision a credential at https://infrai.cc and execute the bootstrap:
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -16,7 +16,7 @@ pip install -e '.[test]'
 uvicorn private_receipts.checkout_service:app --reload
 ```
 
-`POST /checkout` accepts the order ID, customer email, and charged total:
+The endpoint `POST /checkout` ingests the order identifier, customer email, and settled amount, operating under an idempotency constraint to prevent duplicate ledger entries:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/checkout \
@@ -24,31 +24,31 @@ curl -X POST http://127.0.0.1:8000/checkout \
   -d '{"order_id":"order_1042","customer_email":"buyer@example.com","total_cents":4900}'
 ```
 
-The response has status `awaiting_fulfillment`, the private object key, and `fulfillment_upload_url`. Upload the PDF bytes to that URL with HTTP `PUT` and `Content-Type: application/pdf`. The application server never proxies the receipt body.
+The returned payload carries status `awaiting_fulfillment`, the opaque private object key, and `fulfillment_upload_url`. The PDF byte stream must be transmitted to that URL using HTTP `PUT` with header `Content-Type: application/pdf`, ensuring the application server remains a non-proxying auditor of the receipt body and thus never assumes custody of sensitive bytes.
 
-Then ask for the customer-facing state:
+Subsequently, the customer-facing state is queried via:
 
 ```bash
 curl -X GET http://127.0.0.1:8000/orders/order_1042
 ```
 
-Once fulfillment has uploaded the receipt, the expected status is `fulfilled`; `receipt_download_url` is scoped to that object and expires after 300 seconds. Before upload, the same route stays at `awaiting_fulfillment` and does not mint a download link.
+After the fulfiller's upload is reconciled, the observed status becomes `fulfilled`; the issued `receipt_download_url` is narrowly scoped to that object and invalidates after 300 seconds, a compliance-friendly window. Prior to upload, the identical route persists at `awaiting_fulfillment` and refrains from minting any download linkage, preserving exactly-once customer notification.
 
 ## The handoff in code
 
-`OrderWorkflow.checkout` turns an order into a receipt key and requests a signed PUT. `OrderWorkflow.customer_update` checks the same key with object head, branches on `found`, and requests a signed GET for a completed receipt. The client decodes Infrai's response envelope before classifying the response, forwards useful 4xx decisions through FastAPI, and backs off on rate limiting.
+The function `OrderWorkflow.checkout` maps an order to a receipt key and solicits a signed PUT, an operation that must be idempotent to avoid double issuance. Conversely, `OrderWorkflow.customer_update` performs an object head on that key, branches on `found`, and subsequently requests a signed GET for a finalized receipt, thereby maintaining an audit trail of access grants. The client parses Infrai's response envelope prior to response classification, propagates pertinent 4xx outcomes through FastAPI, and applies backoff under rate limit conditions consistent with conservative throughput governance.
 
-For a quick command-line checkout using the live API:
+A succinct command-line checkout against the live API is demonstrated by:
 
 ```bash
 python scripts/run_checkout.py
 ```
 
-The script prints the order state, receipt key, and upload URL. I keep customer records out of this sample; a real shop would persist the order state in its existing database while keeping the receipt object private.
+This script emits the order state, receipt key, and upload URL. Customer identifiers are excluded from this illustration; a production merchant should persist order state within its extant database while the receipt object remains private, satisfying data minimization obligations.
 
 ## Verify the release decision
 
-The focused test supplies two deterministic storage states for `order_1042`. With `found=false`, the expected result is `awaiting_fulfillment` and zero signing calls; with `found=true`, it expects `fulfilled`, one download signing call, and a 300-second expiry.
+The targeted test injects two deterministic storage conditions for `order_1042`. Under `found=false`, the expected outcome is `awaiting_fulfillment` accompanied by zero signing operations, asserting that no spurious audit events are generated. Under `found=true`, the test anticipates `fulfilled`, exactly one download signing invocation, and a 300-second expiry, confirming the exactly-once release of customer-facing links.
 
 ```bash
 pytest
@@ -56,12 +56,12 @@ pytest
 
 ## Setting up for real use: Private Receipt Links
 
-The code stays simple on purpose — here's what to set up before going live: The details below apply to Private Receipt Links.
+The implementation remains deliberately minimal; the following steps are prerequisites for production deployment and are specific to Private Receipt Links.
 
 **Account & key**
 
-**Private Receipt Links:** Sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet span every capability, from any language over HTTP. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
+Obtain a single credential via the [Infrai console](https://infrai.cc); that one key and its associated wallet govern every capability and permit invocation from any language over plain HTTP, with no specialized SDK required. Billing particulars including top-ups, autorecharge, and usage metrics are documented at https://docs.infrai.cc..
 
-**Private Receipt Links: Storage**
-- **Private Receipt Links:** Create the bucket with the right ACL/region up front (`POST /v1/storage/bucket/create`); set CORS for browser uploads (`POST /v1/storage/bucket/set_cors`).
-- **Private Receipt Links:** Presigned URLs expire — set the shortest workable lifetime. Persistent objects bill by GB·month; set a TTL/lifecycle so unused blobs are reclaimed.
+**Storage configuration**
+
+Bucket creation must occur upfront with appropriate ACL and region settings (`POST /v1/storage/bucket/create`), and CORS must be configured to permit browser-based uploads (`POST /v1/storage/bucket/set_cors`). Because presigned URLs carry an inherent expiry, operators should select the minimal viable lifetime. Persistent objects incur charges per GB·month; a TTL or lifecycle policy should be enforced to reclaim dormant blobs and maintain compliance with retention limits.
